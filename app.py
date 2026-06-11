@@ -6,33 +6,75 @@ import anthropic
 import os
 import io
 import time
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 
 # =============================================
 # 1. ตั้งค่าหน้าตาเว็บ
 # =============================================
 st.set_page_config(page_title="AI Meeting Tracker", layout="wide")
-st.title("📝 ระบบบันทึกการประชุม → แจ้งเตือนสั้นผ่าน LINE & แยกไฟล์ประวัติ")
-st.write("เวอร์ชันใช้ Claude AI | เพิ่มคอลัมน์อุปสรรค/งานที่ทำ และแยกเก็บไฟล์งานที่จบแล้ว (Done/Closed) อัตโนมัติ")
+st.title("📝 ระบบบันทึกการประชุม → แจ้งเตือนสั้นผ่าน LINE & อัปโหลด Google Drive")
+st.write("เวอร์ชันใช้ Claude AI | อัปโหลดไฟล์ Excel ขึ้น Google Drive อัตโนมัติ")
 
 # =============================================
 # 2. โหลด Config จาก Streamlit Secrets
 # =============================================
 try:
-    line_bot_token = st.secrets["LINE_BOT_TOKEN"]
-    line_user_id   = st.secrets["LINE_USER_ID"]
-    anthropic_key  = st.secrets["ANTHROPIC_API_KEY"]
+    line_bot_token   = st.secrets["LINE_BOT_TOKEN"]
+    line_user_id     = st.secrets["LINE_USER_ID"]
+    anthropic_key    = st.secrets["ANTHROPIC_API_KEY"]
     google_drive_url = st.secrets.get("GOOGLE_DRIVE_URL", "https://drive.google.com")
+    drive_folder_id  = st.secrets["GOOGLE_DRIVE_FOLDER_ID"]
+    gcp_credentials  = dict(st.secrets["gcp_service_account"])
 except Exception:
-    # fallback สำหรับ dev local (ใช้ .env หรือใส่ตรงนี้ชั่วคราว)
     line_bot_token   = os.environ.get("LINE_BOT_TOKEN", "")
     line_user_id     = os.environ.get("LINE_USER_ID", "")
     anthropic_key    = os.environ.get("ANTHROPIC_API_KEY", "")
     google_drive_url = os.environ.get("GOOGLE_DRIVE_URL", "https://drive.google.com")
+    drive_folder_id  = os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "")
+    gcp_credentials  = {}
 
 # =============================================
-# 3. ฟังก์ชันส่ง LINE Notification
+# 3. ฟังก์ชัน Upload ไฟล์ขึ้น Google Drive
 # =============================================
-def send_line_notification(df_active):
+def upload_to_drive(file_bytes: bytes, filename: str, folder_id: str) -> str:
+    """Upload ไฟล์ขึ้น Google Drive แล้วคืน URL"""
+    try:
+        creds = service_account.Credentials.from_service_account_info(
+            gcp_credentials,
+            scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        service = build("drive", "v3", credentials=creds)
+
+        # ลบไฟล์เก่าที่ชื่อเดียวกันออกก่อน (optional)
+        results = service.files().list(
+            q=f"name='{filename}' and '{folder_id}' in parents and trashed=false",
+            fields="files(id, name)"
+        ).execute()
+        for f in results.get("files", []):
+            service.files().delete(fileId=f["id"]).execute()
+
+        # Upload ไฟล์ใหม่
+        file_metadata = {"name": filename, "parents": [folder_id]}
+        media = MediaIoBaseUpload(
+            io.BytesIO(file_bytes),
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        uploaded = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields="id, webViewLink"
+        ).execute()
+        return uploaded.get("webViewLink", "")
+    except Exception as e:
+        st.error(f"❌ Upload Drive ไม่สำเร็จ: {e}")
+        return ""
+
+# =============================================
+# 4. ฟังก์ชันส่ง LINE Notification
+# =============================================
+def send_line_notification(df_active, active_link="", history_link=""):
     if not line_bot_token or not line_user_id:
         st.warning("⚠️ ยังไม่ได้ตั้งค่า LINE Token — ข้ามการแจ้งเตือน")
         return
@@ -44,12 +86,9 @@ def send_line_notification(df_active):
     }
 
     if df_active.empty:
-        message_text = (
-            "🔔 Issue Tracker อัปเดต\n\n"
-            "ยินดีด้วยครับ! ตอนนี้ไม่มีหัวข้องานค้างสำหรับการประชุมครั้งถัดไปแล้วครับ 🎉"
-        )
+        message_text = "🔔 Issue Tracker อัปเดต\n\nยินดีด้วยครับ! ไม่มีงานค้างแล้ว 🎉"
     else:
-        lines = ["🔔 Issue Tracker อัปเดต", "สรุปหัวข้อติดตามงานในการประชุมครั้งถัดไป:\n"]
+        lines = ["🔔 Issue Tracker อัปเดต", "สรุปหัวข้อติดตามงาน:\n"]
         for _, row in df_active.iterrows():
             lines.append(f"📋 {row['Issue ID']}: {row['หัวข้อปัญหา']}")
             lines.append(f"👤 ผู้รับผิดชอบ: {row['ผู้รับผิดชอบ']}")
@@ -57,11 +96,14 @@ def send_line_notification(df_active):
             lines.append(f"📅 กำหนดเสร็จ: {row['กำหนดเสร็จ']}")
             note = str(row.get('งานที่ทำไปแล้ว / อุปสรรค / Resource ที่ต้องการเพิ่ม', ''))
             if note and note.lower() not in ('none', 'nan', ''):
-                lines.append(f"⚠️ บันทึกหน้างาน: {note}")
+                lines.append(f"⚠️ บันทึก: {note}")
             lines.append("-------------------------")
         message_text = "\n".join(lines)
 
-    message_text += f"\n\n📁 Google Drive:\n{google_drive_url}"
+    if active_link:
+        message_text += f"\n\n📄 Active Issues:\n{active_link}"
+    if history_link:
+        message_text += f"\n📜 History Log:\n{history_link}"
 
     payload = {"to": line_user_id, "messages": [{"type": "text", "text": message_text}]}
     try:
@@ -74,7 +116,7 @@ def send_line_notification(df_active):
         st.error(f"เกิดข้อผิดพลาดการส่ง LINE: {e}")
 
 # =============================================
-# 4. ฟังก์ชันสร้าง Excel ใน Memory (BytesIO)
+# 5. ฟังก์ชันสร้าง Excel ใน Memory
 # =============================================
 def build_excel_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
     buf = io.BytesIO()
@@ -87,12 +129,12 @@ def build_excel_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
     return buf.getvalue()
 
 # =============================================
-# 5. Prompt Template
+# 6. Prompt Template
 # =============================================
 PROMPT_TEMPLATE = """
 คุณคือผู้ช่วยเลขานุการระดับมืออาชีพ จงวิเคราะห์บันทึกการประชุมต่อไปนี้
 แล้วแยกรายการกิจกรรม (Action Items) ออกมาในรูปแบบ JSON Array
-โดยแต่ละรายการต้องมีคอลัมน์ครบดังนี้ (ตอบเป็น JSON เท่านั้น ห้ามมีข้อความอื่นนำหน้าหรือต่อท้าย):
+โดยแต่ละรายการต้องมีคอลัมน์ครบดังนี้ (ตอบเป็น JSON เท่านั้น):
 
 1. "Issue ID"         : รันเลขเริ่มต้น ISS-001, ISS-002 ...
 2. "หัวข้อปัญหา"       : อธิบายปัญหาหรืองานสั้นๆ กระชับชัดเจน
@@ -102,8 +144,7 @@ PROMPT_TEMPLATE = """
 6. "ผู้ติดตาม"         : ใส่ "Teetat" เสมอ
 7. "สถานะ"            : ถ้าบทสนทนาบอกว่าเสร็จ/ปิดงาน → "Closed" หรือ "Done"
                         นอกนั้น → "In Progress" หรือ "Open"
-8. "งานที่ทำไปแล้ว / อุปสรรค / Resource ที่ต้องการเพิ่ม" :
-   สรุปสั้นๆ ว่าทำอะไรไปแล้ว ติดปัญหาอะไร หรือต้องรออะไรเพิ่ม
+8. "งานที่ทำไปแล้ว / อุปสรรค / Resource ที่ต้องการเพิ่ม" : สรุปสั้นๆ
 9. "ความคิดเห็น / Comments" : ข้อความสรุปพูดคุยสั้นๆ
 10. "กำหนดเสร็จ"      : รูปแบบ DD/MM/YYYY คำนวณจากบริบทปี 2026
 
@@ -121,7 +162,7 @@ EXPECTED_COLUMNS = [
 ]
 
 # =============================================
-# 6. UI — กล่องรับข้อความ
+# 7. UI
 # =============================================
 default_text = """บอส: สัปดาห์หน้าเราต้องเคลียร์เรื่องกล้องวงจรปิดในไลน์ผลิตใหม่ให้เสร็จนะ
 พี่เกรียงศักดิ์: ได้ครับ เดี๋ยวผมไปเคลียร์หน้างานและหาซัพพลายเออร์เข้ามาประเมินราคาให้เสร็จภายในวันศุกร์หน้าที่ 19 ครับ แต่ตอนนี้แอบติดปัญหาเรื่องแบบแปลนอาคารเก่านิดหน่อย ขาดข้อมูลโยธาครับ
@@ -137,19 +178,18 @@ raw_notes = st.text_area(
 )
 
 # =============================================
-# 7. ปุ่มประมวลผล
+# 8. ปุ่มประมวลผล
 # =============================================
-if st.button("🚀 ประมวลผลและแยกไฟล์ Excel & แจ้งเตือน LINE", type="primary"):
+if st.button("🚀 ประมวลผล + อัปโหลด Google Drive + แจ้งเตือน LINE", type="primary"):
     if not raw_notes.strip():
         st.warning("⚠️ กรุณาพิมพ์บันทึกการประชุมก่อนครับ")
     elif not anthropic_key:
-        st.error("❌ ไม่พบ ANTHROPIC_API_KEY — กรุณาตั้งค่าใน Streamlit Secrets ครับ")
+        st.error("❌ ไม่พบ ANTHROPIC_API_KEY")
     else:
         with st.spinner("🤖 Claude AI กำลังวิเคราะห์บันทึกการประชุม..."):
             try:
                 client = anthropic.Anthropic(api_key=anthropic_key)
 
-                # เรียก Claude API พร้อม retry อัตโนมัติ
                 max_retries = 3
                 response = None
                 for attempt in range(max_retries):
@@ -170,10 +210,7 @@ if st.button("🚀 ประมวลผลและแยกไฟล์ Excel 
                         else:
                             raise e
 
-                # แยก JSON ออกจาก response
                 raw_text = response.content[0].text.strip()
-
-                # ลอง clean JSON กรณี Claude ใส่ backtick มาด้วย
                 if raw_text.startswith("```"):
                     raw_text = raw_text.split("```")[1]
                     if raw_text.startswith("json"):
@@ -182,24 +219,18 @@ if st.button("🚀 ประมวลผลและแยกไฟล์ Excel 
 
                 data_json = json.loads(raw_text)
                 df_all = pd.DataFrame(data_json)
-
-                # จัดคอลัมน์ให้ตรง
                 df_all.insert(0, '#', range(1, len(df_all) + 1))
                 df_all.columns = EXPECTED_COLUMNS
 
-                # แยก Active vs History
                 done_statuses = {'closed', 'done'}
                 mask_done = df_all['สถานะ'].str.lower().str.strip().isin(done_statuses)
                 df_active  = df_all[~mask_done].copy().reset_index(drop=True)
                 df_history = df_all[ mask_done].copy().reset_index(drop=True)
 
-                # สร้างไฟล์ Excel ใน memory
                 active_bytes  = build_excel_bytes(df_active,  'Active Issues')
                 history_bytes = build_excel_bytes(df_history, 'History Log')
 
-                # =============================================
-                # แสดงผลตาราง
-                # =============================================
+                # แสดงตาราง
                 st.subheader(f"📌 งานคงค้าง (Active) — {len(df_active)} รายการ")
                 if df_active.empty:
                     st.info("ไม่มีงานค้างครับ 🎉")
@@ -212,12 +243,27 @@ if st.button("🚀 ประมวลผลและแยกไฟล์ Excel 
                 else:
                     st.dataframe(df_history, use_container_width=True)
 
-                # =============================================
-                # ปุ่ม Download Excel
-                # =============================================
+                # Upload Google Drive
                 st.divider()
-                st.subheader("⬇️ ดาวน์โหลดไฟล์ Excel")
+                active_link  = ""
+                history_link = ""
 
+                if drive_folder_id and gcp_credentials:
+                    with st.spinner("☁️ กำลังอัปโหลดขึ้น Google Drive..."):
+                        active_link  = upload_to_drive(active_bytes,  "Meeting_Issue_Log.xlsx",            drive_folder_id)
+                        history_link = upload_to_drive(history_bytes, "Meeting_Issue_History_Backup.xlsx", drive_folder_id)
+
+                    if active_link:
+                        st.success("✅ อัปโหลด Google Drive สำเร็จแล้วครับ!")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.markdown(f"📄 [เปิด Active Issues.xlsx]({active_link})")
+                        with col2:
+                            st.markdown(f"📜 [เปิด History Log.xlsx]({history_link})")
+
+                # ปุ่ม Download สำรอง
+                st.divider()
+                st.subheader("⬇️ ดาวน์โหลดไฟล์ Excel (สำรอง)")
                 col1, col2 = st.columns(2)
                 with col1:
                     st.download_button(
@@ -234,17 +280,12 @@ if st.button("🚀 ประมวลผลและแยกไฟล์ Excel 
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
 
-                st.markdown(f"📁 **[เปิด Google Drive เพื่อนำไฟล์ไปอัปโหลด]({google_drive_url})**")
-
-                # =============================================
-                # ส่ง LINE (เฉพาะ Active)
-                # =============================================
-                send_line_notification(df_active)
+                # ส่ง LINE
+                send_line_notification(df_active, active_link, history_link)
 
             except json.JSONDecodeError as e:
-                st.error(f"❌ Claude ตอบกลับไม่ใช่ JSON ที่ถูกต้อง: {e}")
-                st.code(raw_text[:2000], language="text")
+                st.error(f"❌ Claude ตอบกลับไม่ใช่ JSON: {e}")
             except anthropic.AuthenticationError:
-                st.error("❌ API Key ไม่ถูกต้อง — กรุณาตรวจสอบ ANTHROPIC_API_KEY")
+                st.error("❌ API Key ไม่ถูกต้อง")
             except Exception as e:
                 st.error(f"เกิดข้อผิดพลาด: {e}")
