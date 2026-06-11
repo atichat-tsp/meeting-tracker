@@ -6,16 +6,13 @@ import anthropic
 import os
 import io
 import time
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
 
 # =============================================
 # 1. ตั้งค่าหน้าตาเว็บ
 # =============================================
 st.set_page_config(page_title="AI Meeting Tracker", layout="wide")
-st.title("📝 ระบบบันทึกการประชุม → แจ้งเตือนสั้นผ่าน LINE & อัปโหลด Google Drive")
-st.write("เวอร์ชันใช้ Claude AI | อัปโหลดไฟล์ Excel ขึ้น Google Drive อัตโนมัติ")
+st.title("📝 ระบบบันทึกการประชุม → แจ้งเตือนสั้นผ่าน LINE & อัปโหลด OneDrive")
+st.write("เวอร์ชันใช้ Claude AI | อัปโหลดไฟล์ Excel ขึ้น OneDrive อัตโนมัติ")
 
 # =============================================
 # 2. โหลด Config จาก Streamlit Secrets
@@ -24,57 +21,58 @@ try:
     line_bot_token   = st.secrets["LINE_BOT_TOKEN"]
     line_user_id     = st.secrets["LINE_USER_ID"]
     anthropic_key    = st.secrets["ANTHROPIC_API_KEY"]
-    google_drive_url = st.secrets.get("GOOGLE_DRIVE_URL", "https://drive.google.com")
-    drive_folder_id  = st.secrets["GOOGLE_DRIVE_FOLDER_ID"]
-    gcp_credentials  = dict(st.secrets["gcp_service_account"])
+    onedrive_url     = st.secrets.get("ONEDRIVE_URL", "https://tspmetal-my.sharepoint.com")
+    tenant_id        = st.secrets["AZURE_TENANT_ID"]
+    client_id        = st.secrets["AZURE_CLIENT_ID"]
+    client_secret    = st.secrets["AZURE_CLIENT_SECRET"]
+    onedrive_folder  = st.secrets.get("ONEDRIVE_FOLDER", "Meeting Tracker")
 except Exception:
     line_bot_token   = os.environ.get("LINE_BOT_TOKEN", "")
     line_user_id     = os.environ.get("LINE_USER_ID", "")
     anthropic_key    = os.environ.get("ANTHROPIC_API_KEY", "")
-    google_drive_url = os.environ.get("GOOGLE_DRIVE_URL", "https://drive.google.com")
-    drive_folder_id  = os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "")
-    gcp_credentials  = {}
+    onedrive_url     = os.environ.get("ONEDRIVE_URL", "")
+    tenant_id        = os.environ.get("AZURE_TENANT_ID", "")
+    client_id        = os.environ.get("AZURE_CLIENT_ID", "")
+    client_secret    = os.environ.get("AZURE_CLIENT_SECRET", "")
+    onedrive_folder  = os.environ.get("ONEDRIVE_FOLDER", "Meeting Tracker")
 
 # =============================================
-# 3. ฟังก์ชัน Upload ไฟล์ขึ้น Google Drive
+# 3. ฟังก์ชัน OneDrive Upload
 # =============================================
-def upload_to_drive(file_bytes: bytes, filename: str, folder_id: str) -> str:
-    """Upload ไฟล์ขึ้น Google Drive แล้วคืน URL"""
+def get_access_token():
+    """ขอ Access Token จาก Azure AD"""
+    url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    data = {
+        "grant_type": "client_credentials",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "scope": "https://graph.microsoft.com/.default"
+    }
+    resp = requests.post(url, data=data, timeout=15)
+    resp.raise_for_status()
+    return resp.json()["access_token"]
+
+def upload_to_onedrive(file_bytes: bytes, filename: str) -> str:
+    """Upload ไฟล์ขึ้น OneDrive แล้วคืน URL"""
     try:
-        creds = service_account.Credentials.from_service_account_info(
-            gcp_credentials,
-            scopes=["https://www.googleapis.com/auth/drive"]
-        )
-        service = build("drive", "v3", credentials=creds)
+        token = get_access_token()
+        headers = {"Authorization": f"Bearer {token}"}
 
-        # ลบไฟล์เก่าที่ชื่อเดียวกันออกก่อน (optional)
-        results = service.files().list(
-            q=f"name='{filename}' and '{folder_id}' in parents and trashed=false",
-            fields="files(id, name)",
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True
-        ).execute()
-        for f in results.get("files", []):
-            service.files().delete(
-                fileId=f["id"],
-                supportsAllDrives=True
-            ).execute()
+        # ค้นหา user id จาก email
+        user_email = "atichat@tspmetal.com"
 
-        # Upload ไฟล์ใหม่
-        file_metadata = {"name": filename, "parents": [folder_id]}
-        media = MediaIoBaseUpload(
-            io.BytesIO(file_bytes),
-            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-        uploaded = service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields="id, webViewLink",
-            supportsAllDrives=True
-        ).execute()
-        return uploaded.get("webViewLink", "")
+        # Upload ไฟล์เข้า folder
+        upload_url = f"https://graph.microsoft.com/v1.0/users/{user_email}/drive/root:/{onedrive_folder}/{filename}:/content"
+        upload_headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+        resp = requests.put(upload_url, headers=upload_headers, data=file_bytes, timeout=30)
+        resp.raise_for_status()
+        result = resp.json()
+        return result.get("webUrl", "")
     except Exception as e:
-        st.error(f"❌ Upload Drive ไม่สำเร็จ: {e}")
+        st.error(f"❌ Upload OneDrive ไม่สำเร็จ: {e}")
         return ""
 
 # =============================================
@@ -82,7 +80,7 @@ def upload_to_drive(file_bytes: bytes, filename: str, folder_id: str) -> str:
 # =============================================
 def send_line_notification(df_active, active_link="", history_link=""):
     if not line_bot_token or not line_user_id:
-        st.warning("⚠️ ยังไม่ได้ตั้งค่า LINE Token — ข้ามการแจ้งเตือน")
+        st.warning("⚠️ ยังไม่ได้ตั้งค่า LINE Token")
         return
 
     url = "https://api.line.me/v2/bot/message/push"
@@ -92,7 +90,7 @@ def send_line_notification(df_active, active_link="", history_link=""):
     }
 
     if df_active.empty:
-        message_text = "🔔 Issue Tracker อัปเดต\n\nยินดีด้วยครับ! ไม่มีงานค้างแล้ว 🎉"
+        message_text = "🔔 Issue Tracker อัปเดต\n\nไม่มีงานค้างแล้วครับ 🎉"
     else:
         lines = ["🔔 Issue Tracker อัปเดต", "สรุปหัวข้อติดตามงาน:\n"]
         for _, row in df_active.iterrows():
@@ -117,12 +115,12 @@ def send_line_notification(df_active, active_link="", history_link=""):
         if resp.status_code == 200:
             st.success("📲 ส่งแจ้งเตือนเข้า LINE เรียบร้อยแล้วครับ!")
         else:
-            st.error(f"❌ LINE ส่งไม่สำเร็จ: {resp.status_code} — {resp.text}")
+            st.error(f"❌ LINE ส่งไม่สำเร็จ: {resp.status_code}")
     except Exception as e:
         st.error(f"เกิดข้อผิดพลาดการส่ง LINE: {e}")
 
 # =============================================
-# 5. ฟังก์ชันสร้าง Excel ใน Memory
+# 5. ฟังก์ชันสร้าง Excel
 # =============================================
 def build_excel_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
     buf = io.BytesIO()
@@ -140,19 +138,18 @@ def build_excel_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
 PROMPT_TEMPLATE = """
 คุณคือผู้ช่วยเลขานุการระดับมืออาชีพ จงวิเคราะห์บันทึกการประชุมต่อไปนี้
 แล้วแยกรายการกิจกรรม (Action Items) ออกมาในรูปแบบ JSON Array
-โดยแต่ละรายการต้องมีคอลัมน์ครบดังนี้ (ตอบเป็น JSON เท่านั้น):
+(ตอบเป็น JSON เท่านั้น ห้ามมีข้อความอื่น):
 
-1. "Issue ID"         : รันเลขเริ่มต้น ISS-001, ISS-002 ...
-2. "หัวข้อปัญหา"       : อธิบายปัญหาหรืองานสั้นๆ กระชับชัดเจน
-3. "ผู้แจ้ง"           : ชื่อผู้แจ้ง/ผู้สั่งงานจากบทสนทนา
+1. "Issue ID"         : ISS-001, ISS-002 ...
+2. "หัวข้อปัญหา"       : อธิบายสั้นๆ กระชับ
+3. "ผู้แจ้ง"           : ชื่อจากบทสนทนา
 4. "Priority"         : High / Medium / Low
-5. "ผู้รับผิดชอบ"      : ชื่อผู้รับผิดชอบจากบทสนทนา
-6. "ผู้ติดตาม"         : ใส่ "Teetat" เสมอ
-7. "สถานะ"            : ถ้าบทสนทนาบอกว่าเสร็จ/ปิดงาน → "Closed" หรือ "Done"
-                        นอกนั้น → "In Progress" หรือ "Open"
+5. "ผู้รับผิดชอบ"      : ชื่อจากบทสนทนา
+6. "ผู้ติดตาม"         : "Teetat" เสมอ
+7. "สถานะ"            : เสร็จ/ปิดงาน → "Closed"/"Done" | อื่นๆ → "In Progress"/"Open"
 8. "งานที่ทำไปแล้ว / อุปสรรค / Resource ที่ต้องการเพิ่ม" : สรุปสั้นๆ
-9. "ความคิดเห็น / Comments" : ข้อความสรุปพูดคุยสั้นๆ
-10. "กำหนดเสร็จ"      : รูปแบบ DD/MM/YYYY คำนวณจากบริบทปี 2026
+9. "ความคิดเห็น / Comments" : สรุปสั้นๆ
+10. "กำหนดเสร็จ"      : DD/MM/YYYY (ปี 2026)
 
 บันทึกการประชุม:
 \"\"\"
@@ -179,34 +176,29 @@ default_text = """บอส: สัปดาห์หน้าเราต้อ
 raw_notes = st.text_area(
     "✍️ พิมพ์บันทึกการประชุมดิบที่นี่:",
     value=default_text,
-    height=220,
-    placeholder="วางบันทึกประชุมดิบได้เลยครับ ไม่จำกัดความยาว..."
+    height=220
 )
 
 # =============================================
 # 8. ปุ่มประมวลผล
 # =============================================
-if st.button("🚀 ประมวลผล + อัปโหลด Google Drive + แจ้งเตือน LINE", type="primary"):
+if st.button("🚀 ประมวลผล + อัปโหลด OneDrive + แจ้งเตือน LINE", type="primary"):
     if not raw_notes.strip():
         st.warning("⚠️ กรุณาพิมพ์บันทึกการประชุมก่อนครับ")
     elif not anthropic_key:
         st.error("❌ ไม่พบ ANTHROPIC_API_KEY")
     else:
-        with st.spinner("🤖 Claude AI กำลังวิเคราะห์บันทึกการประชุม..."):
+        with st.spinner("🤖 Claude AI กำลังวิเคราะห์..."):
             try:
                 client = anthropic.Anthropic(api_key=anthropic_key)
 
                 max_retries = 3
-                response = None
                 for attempt in range(max_retries):
                     try:
                         response = client.messages.create(
                             model="claude-sonnet-4-6",
                             max_tokens=8192,
-                            messages=[{
-                                "role": "user",
-                                "content": PROMPT_TEMPLATE.format(raw_notes=raw_notes)
-                            }]
+                            messages=[{"role": "user", "content": PROMPT_TEMPLATE.format(raw_notes=raw_notes)}]
                         )
                         break
                     except anthropic.APIStatusError as e:
@@ -245,22 +237,22 @@ if st.button("🚀 ประมวลผล + อัปโหลด Google Drive
 
                 st.subheader(f"📜 งานที่สิ้นสุดแล้ว (History) — {len(df_history)} รายการ")
                 if df_history.empty:
-                    st.info("ไม่มีงานที่ปิดแล้วในรอบนี้ครับ")
+                    st.info("ไม่มีงานที่ปิดแล้วครับ")
                 else:
                     st.dataframe(df_history, use_container_width=True)
 
-                # Upload Google Drive
+                # Upload OneDrive
                 st.divider()
-                active_link  = ""
+                active_link = ""
                 history_link = ""
 
-                if drive_folder_id and gcp_credentials:
-                    with st.spinner("☁️ กำลังอัปโหลดขึ้น Google Drive..."):
-                        active_link  = upload_to_drive(active_bytes,  "Meeting_Issue_Log.xlsx",            drive_folder_id)
-                        history_link = upload_to_drive(history_bytes, "Meeting_Issue_History_Backup.xlsx", drive_folder_id)
+                if tenant_id and client_id and client_secret:
+                    with st.spinner("☁️ กำลังอัปโหลดขึ้น OneDrive..."):
+                        active_link  = upload_to_onedrive(active_bytes,  "Meeting_Issue_Log.xlsx")
+                        history_link = upload_to_onedrive(history_bytes, "Meeting_Issue_History_Backup.xlsx")
 
                     if active_link:
-                        st.success("✅ อัปโหลด Google Drive สำเร็จแล้วครับ!")
+                        st.success("✅ อัปโหลด OneDrive สำเร็จแล้วครับ!")
                         col1, col2 = st.columns(2)
                         with col1:
                             st.markdown(f"📄 [เปิด Active Issues.xlsx]({active_link})")
@@ -286,7 +278,6 @@ if st.button("🚀 ประมวลผล + อัปโหลด Google Drive
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
 
-                # ส่ง LINE
                 send_line_notification(df_active, active_link, history_link)
 
             except json.JSONDecodeError as e:
