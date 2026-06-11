@@ -50,10 +50,15 @@ def upload_to_drive(file_bytes: bytes, filename: str, folder_id: str) -> str:
         # ลบไฟล์เก่าที่ชื่อเดียวกันออกก่อน (optional)
         results = service.files().list(
             q=f"name='{filename}' and '{folder_id}' in parents and trashed=false",
-            fields="files(id, name)"
+            fields="files(id, name)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
         ).execute()
         for f in results.get("files", []):
-            service.files().delete(fileId=f["id"]).execute()
+            service.files().delete(
+                fileId=f["id"],
+                supportsAllDrives=True
+            ).execute()
 
         # Upload ไฟล์ใหม่
         file_metadata = {"name": filename, "parents": [folder_id]}
@@ -64,7 +69,8 @@ def upload_to_drive(file_bytes: bytes, filename: str, folder_id: str) -> str:
         uploaded = service.files().create(
             body=file_metadata,
             media_body=media,
-            fields="id, webViewLink"
+            fields="id, webViewLink",
+            supportsAllDrives=True
         ).execute()
         return uploaded.get("webViewLink", "")
     except Exception as e:
