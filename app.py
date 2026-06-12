@@ -97,6 +97,7 @@ def get_access_token():
     return resp.json()["access_token"]
 
 def upload_to_onedrive(file_bytes: bytes, filename: str) -> str:
+    import time as _time
     try:
         token = get_access_token()
         upload_url = f"https://graph.microsoft.com/v1.0/users/{user_email}/drive/root:/{onedrive_folder}/{filename}:/content"
@@ -104,8 +105,28 @@ def upload_to_onedrive(file_bytes: bytes, filename: str) -> str:
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         }
-        resp = requests.put(upload_url, headers=headers, data=file_bytes, timeout=30)
-        resp.raise_for_status()
+        # retry สูงสุด 3 ครั้ง ถ้าเจอ 423 Locked
+        for attempt in range(3):
+            resp = requests.put(upload_url, headers=headers, data=file_bytes, timeout=30)
+            if resp.status_code == 423:
+                if attempt < 2:
+                    _time.sleep(2)
+                    continue
+                else:
+                    st.error("❌ ไฟล์ถูกเปิดอยู่ใน Excel กรุณาปิดไฟล์แล้วลองใหม่ครับ")
+                    return ""
+            resp.raise_for_status()
+            break
+
+        item_id = resp.json().get("id", "")
+        if item_id:
+            share_url = (f"https://graph.microsoft.com/v1.0/users/{user_email}"
+                         f"/drive/items/{item_id}/createLink")
+            sr = requests.post(share_url,
+                               headers={**headers, "Content-Type": "application/json"},
+                               json={"type": "view", "scope": "anonymous"}, timeout=15)
+            if sr.status_code in (200, 201):
+                return sr.json().get("link", {}).get("webUrl", "")
         return resp.json().get("webUrl", "")
     except Exception as e:
         st.error(f"❌ Upload OneDrive ไม่สำเร็จ: {e}")
