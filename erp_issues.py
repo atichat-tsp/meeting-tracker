@@ -128,14 +128,28 @@ def get_token() -> str:
 def upload_onedrive(file_bytes: bytes, filename: str) -> str:
     try:
         token = get_token()
-        url   = (f"https://graph.microsoft.com/v1.0/users/{user_email}"
-                 f"/drive/root:/{onedrive_folder}/{filename}:/content")
+        # อัปโหลดไฟล์
+        upload_url = (f"https://graph.microsoft.com/v1.0/users/{user_email}"
+                      f"/drive/root:/{onedrive_folder}/{filename}:/content")
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         }
-        r = requests.put(url, headers=headers, data=file_bytes, timeout=30)
+        r = requests.put(upload_url, headers=headers, data=file_bytes, timeout=30)
         r.raise_for_status()
+        item_id = r.json().get("id", "")
+
+        # สร้าง sharing link แบบ "Anyone with the link can view"
+        if item_id:
+            share_url = (f"https://graph.microsoft.com/v1.0/users/{user_email}"
+                         f"/drive/items/{item_id}/createLink")
+            share_body = {"type": "view", "scope": "anonymous"}
+            sr = requests.post(share_url,
+                               headers={**headers, "Content-Type": "application/json"},
+                               json=share_body, timeout=15)
+            if sr.status_code in (200, 201):
+                return sr.json().get("link", {}).get("webUrl", "")
+
         return r.json().get("webUrl", "")
     except Exception as e:
         st.error(f"❌ Upload OneDrive ไม่สำเร็จ: {e}")
@@ -392,7 +406,7 @@ open_issues = df_active[
 if open_issues.empty:
     st.info("ไม่มี issue ที่ยังเปิดอยู่ครับ 🎉")
 else:
-    for _, row in open_issues.iterrows():
+    for idx, (_, row) in enumerate(open_issues.iterrows()):
         iid     = str(row.get("รหัส Issue", ""))
         itopic  = str(row.get("หัวข้อปัญหา", ""))
         istatus = str(row.get("สถานะ", "Pending"))
@@ -415,19 +429,19 @@ else:
             with cu1:
                 commenter = st.selectbox(
                     "ผู้ดำเนินการ / ผู้ให้ความเห็น:",
-                    USERS, key=f"who_{iid}"
+                    USERS, key=f"who_{idx}_{iid}"
                 )
             with cu2:
                 new_comment = st.text_area(
                     "ความคิดเห็น / การดำเนินการ:",
-                    key=f"cmt_{iid}", height=80,
+                    key=f"cmt_{idx}_{iid}", height=80,
                     placeholder="เช่น ติดต่อ vendor แล้ว รอ patch\nทดสอบระบบแล้ว ปกติ"
                 )
             with cu3:
                 new_status = st.selectbox(
                     "สถานะ:", STATUS,
                     index=STATUS.index(istatus) if istatus in STATUS else 0,
-                    key=f"st_{iid}"
+                    key=f"st_{idx}_{iid}"
                 )
 
             # บันทึกลง session_state ทันทีที่ widget เปลี่ยน
@@ -435,7 +449,7 @@ else:
             st.session_state[f"saved_cmt_{iid}"]    = new_comment
             st.session_state[f"saved_status_{iid}"] = new_status
 
-            if st.button(f"💾 บันทึก {iid}", key=f"save_{iid}"):
+            if st.button(f"💾 บันทึก {iid}", key=f"save_{idx}_{iid}"):
                 _who     = st.session_state.get(f"saved_who_{iid}",    USERS[0])
                 _comment = st.session_state.get(f"saved_cmt_{iid}",    "")
                 _status  = st.session_state.get(f"saved_status_{iid}", istatus)
