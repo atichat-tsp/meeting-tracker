@@ -126,20 +126,29 @@ def get_token() -> str:
     return requests.post(url, data=data, timeout=15).json()["access_token"]
 
 def upload_onedrive(file_bytes: bytes, filename: str) -> str:
+    import time as _time
     try:
         token = get_token()
-        # อัปโหลดไฟล์
         upload_url = (f"https://graph.microsoft.com/v1.0/users/{user_email}"
                       f"/drive/root:/{onedrive_folder}/{filename}:/content")
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         }
-        r = requests.put(upload_url, headers=headers, data=file_bytes, timeout=30)
-        r.raise_for_status()
-        item_id = r.json().get("id", "")
+        # retry สูงสุด 3 ครั้ง ถ้าเจอ 423 Locked
+        for attempt in range(3):
+            r = requests.put(upload_url, headers=headers, data=file_bytes, timeout=30)
+            if r.status_code == 423:
+                if attempt < 2:
+                    _time.sleep(2)
+                    continue
+                else:
+                    st.error("❌ ไฟล์ถูกเปิดอยู่ใน Excel กรุณาปิดไฟล์ ERP_Issue_Log.xlsx แล้วลองใหม่ครับ")
+                    return ""
+            r.raise_for_status()
+            break
 
-        # สร้าง sharing link แบบ "Anyone with the link can view"
+        item_id = r.json().get("id", "")
         if item_id:
             share_url = (f"https://graph.microsoft.com/v1.0/users/{user_email}"
                          f"/drive/items/{item_id}/createLink")
@@ -149,7 +158,6 @@ def upload_onedrive(file_bytes: bytes, filename: str) -> str:
                                json=share_body, timeout=15)
             if sr.status_code in (200, 201):
                 return sr.json().get("link", {}).get("webUrl", "")
-
         return r.json().get("webUrl", "")
     except Exception as e:
         st.error(f"❌ Upload OneDrive ไม่สำเร็จ: {e}")
@@ -479,31 +487,19 @@ else:
                             df_cur["ประเภทแถว"] = df_cur["ประเภทแถว"].fillna("Issue")
                             df_cur.loc[df_cur["ประเภทแถว"] == "", "ประเภทแถว"] = "Issue"
 
-                        # อัปเดตสถานะในแถว Issue หลัก
                         issue_mask = mask & (df_cur["ประเภทแถว"] == "Issue")
+
+                        # อัปเดตสถานะในแถว Issue หลัก
                         df_cur.loc[issue_mask, "สถานะ"] = _status
 
-                        # เพิ่มแถวความเห็นใหม่ต่อท้าย (ถ้ามีข้อความ)
+                        # ต่อท้าย comment ในเซลล์ความคิดเห็นของแถวเดิม
                         if _comment.strip():
-                            cmt_row = {
-                                "สถานะ":        _status,
-                                "ลำดับ":         "",
-                                "รหัส Issue":    iid,
-                                "BU":            str(row.get("BU", "")),
-                                "วันที่รับแจ้ง": now.strftime("%d/%m/%Y %H:%M"),
-                                "ผู้แจ้ง":       _who,
-                                "หัวข้อปัญหา":   "",
-                                "คำอธิบาย":      "",
-                                "ระดับผลกระทบ":  "",
-                                "แนวทางแก้ไข":   "",
-                                "วันที่คาดเสร็จ":"",
-                                "ผู้รับผิดชอบ":  "",
-                                "ช่องทางติดต่อ": "",
-                                "ความคิดเห็น":   _comment.strip(),
-                                "ประเภทแถว":     "ความเห็น",
-                            }
-                            df_cur = pd.concat([df_cur, pd.DataFrame([cmt_row])],
-                                               ignore_index=True)
+                            old_cmt = str(df_cur.loc[issue_mask, "ความคิดเห็น"].values[0])
+                            old_cmt = "" if old_cmt in ("nan", "None", "") else old_cmt
+                            date_str  = now.strftime("%d/%m/%Y")
+                            new_entry = f"[{date_str}] {_who}: {_comment.strip()}"
+                            new_cmt   = f"{old_cmt}\n{new_entry}".strip()
+                            df_cur.loc[issue_mask, "ความคิดเห็น"] = new_cmt
 
                         link = upload_onedrive(to_excel_bytes(df_cur), ONEDRIVE_FILE)
                         if link:
