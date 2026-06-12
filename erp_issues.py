@@ -191,6 +191,12 @@ def load_issues() -> pd.DataFrame:
     if data:
         try:
             df = pd.read_excel(io.BytesIO(data))
+            # เติมคอลัมน์ที่อาจไม่มีในข้อมูลเก่า
+            if "ประเภทแถว" not in df.columns:
+                df["ประเภทแถว"] = "Issue"
+            else:
+                df["ประเภทแถว"] = df["ประเภทแถว"].fillna("Issue")
+                df.loc[df["ประเภทแถว"] == "", "ประเภทแถว"] = "Issue"
             return df
         except Exception:
             pass
@@ -216,25 +222,26 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
         df.to_excel(w, index=False, sheet_name="ERP Issues")
         ws = w.sheets["ERP Issues"]
-        # ปรับความกว้างคอลัมน์
         for col in ws.columns:
             mx = max((len(str(c.value or "")) for c in col), default=10)
-            ws.column_dimensions[col[0].column_letter].width = max(mx + 4, 12)
-        # หา index คอลัมน์ ประเภทแถว
+            ws.column_dimensions[col[0].column_letter].width = min(max(mx + 4, 12), 60)
         headers = [c.value for c in ws[1]]
         type_col = headers.index("ประเภทแถว") + 1 if "ประเภทแถว" in headers else None
-        # style แถวความเห็น — พื้นหลังเหลืองอ่อน italic
-        fill_cmt  = PatternFill("solid", fgColor="FFFDE7")
+        fill_cmt   = PatternFill("solid", fgColor="FFFDE7")
         fill_issue = PatternFill("solid", fgColor="E8F5EE")
         for row in ws.iter_rows(min_row=2):
             row_type = str(row[type_col-1].value) if type_col else "Issue"
-            if row_type == "ความเห็น":
-                for cell in row:
+            for cell in row:
+                # wrap text ทุกเซลล์
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+                if row_type == "ความเห็น":
                     cell.fill = fill_cmt
                     cell.font = Font(italic=True, size=10)
-            else:
-                for cell in row:
+                else:
                     cell.fill = fill_issue
+        # ตั้ง row height อัตโนมัติ
+        for row in ws.iter_rows(min_row=2):
+            ws.row_dimensions[row[0].row].height = None
     return buf.getvalue()
 
 # =============================================
@@ -399,9 +406,13 @@ st.divider()
 st.subheader("✏️ อัปเดตสถานะ / ความคิดเห็น")
 
 df_active = load_issues()
-open_issues = df_active[
-    df_active.get("สถานะ", pd.Series(dtype=str)).isin(["Pending", "Considering", "Monitoring"])
-] if not df_active.empty and "สถานะ" in df_active.columns else pd.DataFrame()
+open_issues = pd.DataFrame()
+if not df_active.empty and "สถานะ" in df_active.columns:
+    # กรองเฉพาะแถว Issue หลัก ไม่เอาแถวความเห็น
+    is_issue = df_active.get("ประเภทแถว", pd.Series("Issue", index=df_active.index)) != "ความเห็น"
+    open_issues = df_active[
+        is_issue & df_active["สถานะ"].isin(["Pending", "Considering", "Monitoring"])
+    ]
 
 if open_issues.empty:
     st.info("ไม่มี issue ที่ยังเปิดอยู่ครับ 🎉")
@@ -457,11 +468,20 @@ else:
                 with st.spinner("บันทึก..."):
                     st.cache_data.clear()
                     df_cur = load_issues()
-                    mask   = df_cur["รหัส Issue"] == iid
+                    mask = (df_cur["รหัส Issue"] == iid) & \
+                           (df_cur.get("ประเภทแถว", pd.Series("Issue", index=df_cur.index)) != "ความเห็น")
 
                     if mask.any():
+                        # เติมคอลัมน์ ประเภทแถว ถ้ายังไม่มี (ข้อมูลเก่า)
+                        if "ประเภทแถว" not in df_cur.columns:
+                            df_cur["ประเภทแถว"] = "Issue"
+                        else:
+                            df_cur["ประเภทแถว"] = df_cur["ประเภทแถว"].fillna("Issue")
+                            df_cur.loc[df_cur["ประเภทแถว"] == "", "ประเภทแถว"] = "Issue"
+
                         # อัปเดตสถานะในแถว Issue หลัก
-                        df_cur.loc[mask & (df_cur["ประเภทแถว"] == "Issue"), "สถานะ"] = _status
+                        issue_mask = mask & (df_cur["ประเภทแถว"] == "Issue")
+                        df_cur.loc[issue_mask, "สถานะ"] = _status
 
                         # เพิ่มแถวความเห็นใหม่ต่อท้าย (ถ้ามีข้อความ)
                         if _comment.strip():
