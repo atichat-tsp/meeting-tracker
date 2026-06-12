@@ -46,8 +46,10 @@ COLUMNS = [
     "สถานะ", "ลำดับ", "รหัส Issue", "BU", "วันที่รับแจ้ง",
     "ผู้แจ้ง", "หัวข้อปัญหา", "คำอธิบาย", "ระดับผลกระทบ",
     "แนวทางแก้ไข", "วันที่คาดเสร็จ", "ผู้รับผิดชอบ",
-    "ช่องทางติดต่อ", "ความคิดเห็น",
+    "ช่องทางติดต่อ", "ความคิดเห็น", "ประเภทแถว",
 ]
+# แถวความเห็น/ดำเนินการ จะมี ประเภทแถว = "ความเห็น"
+# แถวหลัก จะมี ประเภทแถว = "Issue"
 
 COLOR = {
     "green":      "#1a5c3a",
@@ -195,13 +197,30 @@ def next_seq(df: pd.DataFrame) -> int:
         return len(df) + 1
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
+    from openpyxl.styles import PatternFill, Font, Alignment
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
         df.to_excel(w, index=False, sheet_name="ERP Issues")
         ws = w.sheets["ERP Issues"]
+        # ปรับความกว้างคอลัมน์
         for col in ws.columns:
             mx = max((len(str(c.value or "")) for c in col), default=10)
             ws.column_dimensions[col[0].column_letter].width = max(mx + 4, 12)
+        # หา index คอลัมน์ ประเภทแถว
+        headers = [c.value for c in ws[1]]
+        type_col = headers.index("ประเภทแถว") + 1 if "ประเภทแถว" in headers else None
+        # style แถวความเห็น — พื้นหลังเหลืองอ่อน italic
+        fill_cmt  = PatternFill("solid", fgColor="FFFDE7")
+        fill_issue = PatternFill("solid", fgColor="E8F5EE")
+        for row in ws.iter_rows(min_row=2):
+            row_type = str(row[type_col-1].value) if type_col else "Issue"
+            if row_type == "ความเห็น":
+                for cell in row:
+                    cell.fill = fill_cmt
+                    cell.font = Font(italic=True, size=10)
+            else:
+                for cell in row:
+                    cell.fill = fill_issue
     return buf.getvalue()
 
 # =============================================
@@ -320,6 +339,7 @@ if submitted:
                 "ผู้รับผิดชอบ":   incharge.strip(),
                 "ช่องทางติดต่อ":  contact.strip(),
                 "ความคิดเห็น":    comment.strip(),
+                "ประเภทแถว":      "Issue",
             }
 
             df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
@@ -391,57 +411,91 @@ else:
             )
             st.markdown("")
 
-            cu1, cu2 = st.columns([3, 1])
+            cu1, cu2, cu3 = st.columns([2, 3, 1])
             with cu1:
-                new_comment = st.text_area(
-                    "เพิ่มความคิดเห็น / อัปเดตความคืบหน้า:",
-                    key=f"cmt_{iid}", height=80,
-                    placeholder="เช่น ชัดเจน: ติดต่อ vendor แล้ว รอ patch\nอ๊อด: ทดสอบระบบแล้ว ปกติ"
+                commenter = st.selectbox(
+                    "ผู้ดำเนินการ / ผู้ให้ความเห็น:",
+                    USERS, key=f"who_{iid}"
                 )
             with cu2:
+                new_comment = st.text_area(
+                    "ความคิดเห็น / การดำเนินการ:",
+                    key=f"cmt_{iid}", height=80,
+                    placeholder="เช่น ติดต่อ vendor แล้ว รอ patch\nทดสอบระบบแล้ว ปกติ"
+                )
+            with cu3:
                 new_status = st.selectbox(
-                    "สถานะใหม่:", STATUS,
+                    "สถานะ:", STATUS,
                     index=STATUS.index(istatus) if istatus in STATUS else 0,
                     key=f"st_{iid}"
                 )
 
+            # บันทึกลง session_state ทันทีที่ widget เปลี่ยน
+            st.session_state[f"saved_who_{iid}"]    = commenter
+            st.session_state[f"saved_cmt_{iid}"]    = new_comment
+            st.session_state[f"saved_status_{iid}"] = new_status
+
             if st.button(f"💾 บันทึก {iid}", key=f"save_{iid}"):
+                _who     = st.session_state.get(f"saved_who_{iid}",    USERS[0])
+                _comment = st.session_state.get(f"saved_cmt_{iid}",    "")
+                _status  = st.session_state.get(f"saved_status_{iid}", istatus)
+
                 with st.spinner("บันทึก..."):
                     st.cache_data.clear()
                     df_cur = load_issues()
                     mask   = df_cur["รหัส Issue"] == iid
+
                     if mask.any():
-                        df_cur.loc[mask, "สถานะ"] = new_status
-                        # ต่อท้าย comment พร้อมวันที่
-                        if new_comment.strip():
-                            old_cmt = str(df_cur.loc[mask, "ความคิดเห็น"].values[0])
-                            old_cmt = "" if old_cmt in ("nan", "None", "") else old_cmt
-                            date_str = now.strftime("%d/%m/%Y")
-                            new_lines = "\n".join(
-                                f"[{date_str}] {ln.strip()}"
-                                for ln in new_comment.splitlines() if ln.strip()
-                            )
-                            df_cur.loc[mask, "ความคิดเห็น"] = f"{old_cmt}\n{new_lines}".strip()
+                        # อัปเดตสถานะในแถว Issue หลัก
+                        df_cur.loc[mask & (df_cur["ประเภทแถว"] == "Issue"), "สถานะ"] = _status
+
+                        # เพิ่มแถวความเห็นใหม่ต่อท้าย (ถ้ามีข้อความ)
+                        if _comment.strip():
+                            cmt_row = {
+                                "สถานะ":        _status,
+                                "ลำดับ":         "",
+                                "รหัส Issue":    iid,
+                                "BU":            str(row.get("BU", "")),
+                                "วันที่รับแจ้ง": now.strftime("%d/%m/%Y %H:%M"),
+                                "ผู้แจ้ง":       _who,
+                                "หัวข้อปัญหา":   "",
+                                "คำอธิบาย":      "",
+                                "ระดับผลกระทบ":  "",
+                                "แนวทางแก้ไข":   "",
+                                "วันที่คาดเสร็จ":"",
+                                "ผู้รับผิดชอบ":  "",
+                                "ช่องทางติดต่อ": "",
+                                "ความคิดเห็น":   _comment.strip(),
+                                "ประเภทแถว":     "ความเห็น",
+                            }
+                            df_cur = pd.concat([df_cur, pd.DataFrame([cmt_row])],
+                                               ignore_index=True)
 
                         link = upload_onedrive(to_excel_bytes(df_cur), ONEDRIVE_FILE)
                         if link:
                             st.success(f"✅ อัปเดต {iid} เรียบร้อยแล้ว")
-                        # แจ้ง LINE เฉพาะเมื่อสถานะเปลี่ยน
-                        if new_status != istatus or new_comment.strip():
+                        else:
+                            st.error("❌ Upload OneDrive ไม่สำเร็จ")
+
+                        if _status != istatus or _comment.strip():
                             line_msg = (
                                 f"🔔 อัปเดตปัญหา ERP — TSP Metal Works\n"
                                 f"วันที่ {now.strftime('%d/%m/%Y')} เวลา {now.strftime('%H:%M')} น.\n"
                                 f"{'─'*30}\n"
                                 f"🆔 {iid} — {itopic}\n"
                             )
-                            if new_status != istatus:
-                                line_msg += f"📊 สถานะ: {istatus} → {new_status}\n"
-                            if new_comment.strip():
-                                line_msg += f"💬 {new_comment.strip()[:120]}\n"
+                            if _status != istatus:
+                                line_msg += f"📊 สถานะ: {istatus} → {_status}\n"
+                            if _comment.strip():
+                                line_msg += f"💬 {_who}: {_comment.strip()[:120]}\n"
                             if link:
                                 line_msg += f"📄 ดูรายละเอียด: {link}"
                             send_line(line_msg)
                             st.success("📲 แจ้ง LINE แล้วครับ!")
+
+                        st.session_state.pop(f"saved_who_{iid}",    None)
+                        st.session_state.pop(f"saved_cmt_{iid}",    None)
+                        st.session_state.pop(f"saved_status_{iid}", None)
                         st.cache_data.clear()
                         st.rerun()
 
