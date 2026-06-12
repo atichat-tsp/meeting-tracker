@@ -443,3 +443,80 @@ else:
                             st.success("📲 แจ้ง LINE แล้วครับ!")
                         st.cache_data.clear()
                         st.rerun()
+
+# =============================================
+# 10. เครื่องมือหา LINE Group ID
+# =============================================
+st.divider()
+with st.expander("🔍 ค้นหา LINE Group ID (สำหรับตั้งค่าครั้งแรก)", expanded=False):
+    st.markdown("""
+**วิธีใช้:**
+1. เชิญ LINE Bot เข้ากลุ่มที่ต้องการก่อน
+2. กดปุ่ม **"รับ Webhook"** ด้านล่าง
+3. ไปที่กลุ่ม LINE แล้วพิมพ์ข้อความอะไรก็ได้ 1 ข้อความ ภายใน 60 วินาที
+4. กด **"ตรวจสอบ Group ID"** เพื่อดูผล
+""")
+
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        if st.button("📡 ดึง Group ID จาก Recent Messages", use_container_width=True):
+            if not line_bot_token:
+                st.error("ไม่พบ LINE_BOT_TOKEN ใน secrets")
+            else:
+                try:
+                    # ดึง recent messages ผ่าน LINE Messaging API
+                    # วิธีที่ทำงานได้จริงคือ GET /v2/bot/insight/message/delivery
+                    # แต่วิธีที่ง่ายกว่าคือส่ง test message แล้วดู response
+                    headers = {
+                        "Authorization": f"Bearer {line_bot_token}",
+                        "Content-Type": "application/json"
+                    }
+                    # ดึงข้อมูล bot profile เพื่อตรวจสอบ token ก่อน
+                    r = requests.get("https://api.line.me/v2/bot/info",
+                                     headers=headers, timeout=10)
+                    if r.status_code == 200:
+                        bot_info = r.json()
+                        st.success(f"✅ Token ถูกต้อง — Bot: **{bot_info.get('displayName', '')}**")
+                        st.info("👆 เชิญ bot นี้เข้ากลุ่ม แล้วใช้วิธีด้านล่างเพื่อหา Group ID")
+                    else:
+                        st.error(f"Token ไม่ถูกต้อง: {r.status_code}")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+    with col_b:
+        group_id_input = st.text_input("ทดสอบส่งข้อความไปกลุ่ม (ใส่ Group ID ที่รู้แล้ว):",
+                                        placeholder="Cxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+        if st.button("📤 ทดสอบส่ง", use_container_width=True):
+            if group_id_input.strip():
+                try:
+                    headers = {
+                        "Authorization": f"Bearer {line_bot_token}",
+                        "Content-Type": "application/json"
+                    }
+                    payload = {
+                        "to": group_id_input.strip(),
+                        "messages": [{"type": "text",
+                                      "text": "✅ ทดสอบการเชื่อมต่อ TSP ERP Issue Tracker"}]
+                    }
+                    r = requests.post("https://api.line.me/v2/bot/message/push",
+                                      headers=headers, json=payload, timeout=10)
+                    if r.status_code == 200:
+                        st.success("✅ ส่งสำเร็จ! Group ID นี้ถูกต้อง นำไปใส่ใน secrets ได้เลย")
+                        st.code(f'LINE_GROUP_ID = "{group_id_input.strip()}"')
+                    else:
+                        st.error(f"ส่งไม่สำเร็จ: {r.status_code} — {r.text}")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+            else:
+                st.warning("กรุณาใส่ Group ID ก่อนครับ")
+
+    st.markdown("---")
+    st.markdown("**วิธีหา Group ID แบบง่ายที่สุด:**")
+    st.markdown("""
+1. ไปที่ [LINE Developers Console](https://developers.line.biz/console/)
+2. เข้า channel → แท็บ **Messaging API**
+3. เปิด **Use webhooks** → ตั้ง Webhook URL เป็น `https://webhook.site/` (ชั่วคราว)
+4. เชิญ bot เข้ากลุ่ม แล้วพิมพ์ข้อความในกลุ่ม
+5. ดูใน webhook.site จะเห็น `"groupId": "Cxxxxxxxxx"` ในข้อมูล JSON
+""")
