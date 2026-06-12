@@ -334,25 +334,25 @@ if submitted:
 
             # แจ้ง LINE
             effect_icon = {"มาก": "🔴", "ปานกลาง": "🟡", "น้อย": "🟢"}.get(effect, "⚪")
-            status_icon = {"Pending": "⏳", "Considering": "🔍",
-                           "Monitoring": "👁️", "Closed": "✅"}.get(status_new, "📌")
             line_msg = (
-                f"🛠️ แจ้งปัญหา ERP ใหม่\n"
-                f"━━━━━━━━━━━━━━━\n"
+                f"🔔 แจ้งปัญหา ERP ใหม่ — TSP Metal Works\n"
+                f"วันที่ {now.strftime('%d/%m/%Y')} เวลา {now.strftime('%H:%M')} น.\n"
+                f"{'─'*30}\n"
                 f"🆔 {issue_id}  |  BU: {bu}\n"
                 f"👤 ผู้แจ้ง: {informer}\n"
                 f"📌 {topic.strip()}\n"
             )
             if desc.strip():
-                line_msg += f"📝 {desc.strip()[:100]}{'...' if len(desc.strip()) > 100 else ''}\n"
+                line_msg += f"📝 {desc.strip()[:120]}{'...' if len(desc.strip()) > 120 else ''}\n"
             line_msg += (
                 f"{effect_icon} ผลกระทบ: {effect}\n"
-                f"{status_icon} สถานะ: {status_new}\n"
+                f"📊 สถานะ: {status_new}\n"
                 f"🎯 กำหนดเสร็จ: {due_str}\n"
             )
             if incharge.strip():
                 line_msg += f"👷 ผู้รับผิดชอบ: {incharge.strip()}\n"
-            line_msg += f"🕐 {now.strftime('%d/%m/%Y %H:%M')} น."
+            if link:
+                line_msg += f"📄 ดูรายละเอียด: {link}"
 
             send_line(line_msg)
             st.success("📲 ส่ง LINE กลุ่มเรียบร้อยแล้วครับ!")
@@ -428,17 +428,18 @@ else:
                             st.success(f"✅ อัปเดต {iid} เรียบร้อยแล้ว")
                         # แจ้ง LINE เฉพาะเมื่อสถานะเปลี่ยน
                         if new_status != istatus or new_comment.strip():
-                            sc2 = STATUS_COLOR.get(new_status, "#999")
                             line_msg = (
-                                f"🔄 อัปเดต ERP Issue\n"
-                                f"━━━━━━━━━━━━━━━\n"
-                                f"🆔 {iid}  {itopic}\n"
+                                f"🔔 อัปเดตปัญหา ERP — TSP Metal Works\n"
+                                f"วันที่ {now.strftime('%d/%m/%Y')} เวลา {now.strftime('%H:%M')} น.\n"
+                                f"{'─'*30}\n"
+                                f"🆔 {iid} — {itopic}\n"
                             )
                             if new_status != istatus:
                                 line_msg += f"📊 สถานะ: {istatus} → {new_status}\n"
                             if new_comment.strip():
                                 line_msg += f"💬 {new_comment.strip()[:120]}\n"
-                            line_msg += f"🕐 {now.strftime('%d/%m/%Y %H:%M')} น."
+                            if link:
+                                line_msg += f"📄 ดูรายละเอียด: {link}"
                             send_line(line_msg)
                             st.success("📲 แจ้ง LINE แล้วครับ!")
                         st.cache_data.clear()
